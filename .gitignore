@@ -1,0 +1,18 @@
+# 編譯產物
+FileWatcher.exe
+hello3.exe
+*.exe
+*.obj
+*.pdb
+
+# 執行期產生的檔案（監控紀錄、設定檔，因人因用途而異，不該進版本控制）
+file_list.txt
+file_list_full.txt
+filewatcher_config.txt
+build_error.txt
+
+# 與本專案無關的除錯用測試檔
+hello.cpp
+
+# 當機傾印
+*.dmp
