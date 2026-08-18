@@ -370,29 +370,65 @@ void LoadOrCreateLogFile(const fs::path& logFile, FileHistory& history) {
 
 // 遞迴掃描目錄下所有檔案（含子目錄），把「歷史紀錄裡從未出現過」的檔案直接附加記錄；
 // 已經在歷史紀錄裡的檔案（表示上次關閉程式前就已經在資料夾裡）直接略過，不重複記錄。
+// 手動用非遞迴的 fs::directory_iterator + 明確的堆疊，逐層遞迴掃描。
+//
+// 原本用 fs::recursive_directory_iterator（讓標準庫自動遞迴）搭配
+// directory_options::skip_permission_denied，理論上遇到讀不到內容的子目錄
+// 應該要跳過繼續，但實測發現：只要磁碟機根目錄底下有 Windows 系統保護的資料夾
+// （例如每個磁碟機都有的 $RECYCLE.BIN、System Volume Information，這些一般
+// 使用者權限讀不到內容），遞迴到那一層時整個迭代器就會直接、悄悄地變成
+// end()，導致後面所有檔案都掃描不到，卻沒有任何錯誤訊息——外表看起來像是
+// 「掃描完成」，但其實只掃了最前面幾筆就整個中止了。這正是使用者回報「匯出
+// 檔案清單後 file_list.txt 完全無資料」的根本原因（實測對象：真實的 D 槽）。
+//
+// 改成自己管理一個待處理目錄的堆疊，每次只對「目前這一層」呼叫不遞迴的
+// fs::directory_iterator：
+//   - 某個子目錄整個打不開（例如系統保護資料夾）→ 該子目錄直接跳過，不影響
+//     堆疊裡其他已排隊、或還沒排隊的目錄。
+//   - 某個子目錄讀到一半失敗 → 放棄該目錄「剩下」的項目，但已經處理過的
+//     項目、以及堆疊裡其他目錄，完全不受影響。
+// 這樣任何單一資料夾的失敗都只會讓「那個資料夾」的內容不完整，不會讓整個
+// 掃描默默提前結束。
 void ScanForNewFiles(const fs::path& rootDir, const fs::path& logFile, FileHistory& history) {
-    std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(rootDir, fs::directory_options::skip_permission_denied, ec);
-         it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (ec) { ec.clear(); continue; }
+    std::vector<fs::path> pending;
+    pending.push_back(rootDir);
 
-        const auto& entry = *it;
-        std::error_code fec;
-        if (!entry.is_regular_file(fec) || fec) continue;
+    while (!pending.empty()) {
+        fs::path dir = pending.back();
+        pending.pop_back();
 
-        // 跳過清單檔案自己
-        if (fs::equivalent(entry.path(), logFile, fec)) continue;
+        std::error_code dec;
+        fs::directory_iterator dirIt(dir, fs::directory_options::skip_permission_denied, dec);
+        if (dec) continue; // 這個目錄本身打不開，略過，不影響其他目錄
+        fs::directory_iterator endIt;
 
-        long long size = GetFileSizeSafe(entry.path());
-        if (size < 0) continue;
+        while (dirIt != endIt) {
+            std::error_code fec;
+            const fs::directory_entry& entry = *dirIt;
 
-        std::wstring relPath = fs::relative(entry.path(), rootDir, fec).wstring();
-        std::wstring key = ToLowerKey(relPath);
-        if (history.find(key) != history.end()) continue; // 歷史上已經記錄過，略過
+            bool isDir = entry.is_directory(fec);
+            if (!fec && isDir) {
+                pending.push_back(entry.path());
+            } else if (!fec) {
+                bool isFile = entry.is_regular_file(fec);
+                if (!fec && isFile && !fs::equivalent(entry.path(), logFile, fec)) {
+                    long long size = GetFileSizeSafe(entry.path());
+                    if (size >= 0) {
+                        std::wstring relPath = fs::relative(entry.path(), rootDir, fec).wstring();
+                        std::wstring key = ToLowerKey(relPath);
+                        if (history.find(key) == history.end()) {
+                            std::string relPathUtf8 = WideToUtf8(relPath);
+                            AppendRecord(logFile, relPathUtf8, size, nullptr);
+                            history[key] = NowString();
+                        }
+                    }
+                }
+            }
 
-        std::string relPathUtf8 = WideToUtf8(relPath);
-        AppendRecord(logFile, relPathUtf8, size, nullptr);
-        history[key] = NowString();
+            std::error_code iec;
+            dirIt.increment(iec);
+            if (iec) break; // 這個目錄剩下的部分讀不到了，放棄剩餘項目，繼續處理堆疊裡的其他目錄
+        }
     }
 }
 
