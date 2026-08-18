@@ -886,13 +886,22 @@ static void LayoutControls(HWND hwnd) {
     MoveWindow(g_hEditLog, 10, 228, w - 20, h - 238, TRUE);
 }
 
-// 開始監控某個資料夾（供主視窗按鈕、系統匣「開始監控全部」、開機自動啟動共用）
-void StartMonitoringEntry(MonitorEntry* entry, HWND hwndMain) {
+// 開始監控某個資料夾（供主視窗按鈕、系統匣「開始監控全部」、開機自動啟動共用）。
+// silent=true 時（開機自動啟動、系統匣「開始監控全部」等批次情境），資料夾目前無法
+// 存取（例如是抽取式磁碟／隨身碟根目錄，這次開機沒有接上）不會跳出錯誤視窗，只會
+// 靜靜略過並記一筆訊息，清單裡該資料夾仍然保留，等下次啟動再重新偵測一次。
+void StartMonitoringEntry(MonitorEntry* entry, HWND hwndMain, bool silent = false) {
     if (!entry || entry->isMonitoring) return;
 
     std::error_code ec;
     if (!fs::exists(entry->targetDir, ec) || !fs::is_directory(entry->targetDir, ec)) {
-        MessageBoxW(hwndMain, (L"資料夾不存在或無效：\n" + entry->targetDir).c_str(), L"錯誤", MB_OK | MB_ICONERROR);
+        if (silent) {
+            UpdateFolderRowStatus(entry->id, L"無法存取(略過)");
+            AppendLogLine(g_hEditLog, L"[略過] " + entry->targetDir +
+                L" 目前無法存取（可能是磁碟機/隨身碟尚未接上），本次啟動先略過此資料夾，下次啟動會重新偵測。");
+        } else {
+            MessageBoxW(hwndMain, (L"資料夾不存在或無效：\n" + entry->targetDir).c_str(), L"錯誤", MB_OK | MB_ICONERROR);
+        }
         return;
     }
 
@@ -961,25 +970,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             10, 228, 640, 260, hwnd, (HMENU)(INT_PTR)IDC_EDIT_LOG, nullptr, nullptr);
         ApplyFont(g_hEditLog);
 
-        // 載入設定檔（可能有多個資料夾）；只保留目前仍然有效的路徑
+        // 載入設定檔（可能有多個資料夾）。注意：目前「無法存取」的路徑（例如隨身碟/外接
+        // 磁碟這次開機沒有接上）**不會**從清單或設定檔移除——只是這次啟動時略過它的監控，
+        // 清單裡繼續保留，下次啟動（例如裝置接上之後）會重新偵測一次。是否移除只由使用者
+        // 自己按「移除資料夾」決定。
         std::vector<std::wstring> savedFolders = LoadConfig();
         std::error_code ec;
-        std::vector<std::wstring> validFolders;
-        for (auto& f : savedFolders) {
-            if (fs::exists(f, ec) && fs::is_directory(f, ec)) validFolders.push_back(f);
-        }
 
-        if (!validFolders.empty()) {
-            for (auto& f : validFolders) {
+        if (!savedFolders.empty()) {
+            for (auto& f : savedFolders) {
                 auto entry = std::make_unique<MonitorEntry>();
                 entry->id = g_nextEntryId++;
                 entry->targetDir = f;
                 entry->hStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-                AddFolderRow(g_hListFolders, entry->id, f, L"已停止");
+                bool available = fs::exists(f, ec) && fs::is_directory(f, ec);
+                AddFolderRow(g_hListFolders, entry->id, f, available ? L"已停止" : L"無法存取(略過)");
                 g_entries.push_back(std::move(entry));
-            }
-            if (validFolders.size() != savedFolders.size()) {
-                PersistFolderList(); // 有失效的路徑被濾掉，順便更新設定檔
             }
             g_silentAutoStart = true;
         } else {
@@ -1073,7 +1079,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
         } else if (id == ID_TRAY_START_ALL) {
-            for (auto& e : g_entries) StartMonitoringEntry(e.get(), hwnd);
+            for (auto& e : g_entries) StartMonitoringEntry(e.get(), hwnd, /*silent=*/true);
         } else if (id == ID_TRAY_STOP_ALL) {
             for (auto& e : g_entries) StopMonitoringEntry(e.get());
         } else if (id == ID_TRAY_EXIT) {
@@ -1131,7 +1137,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_APP_AUTOSTART_ALL: {
-        for (auto& e : g_entries) StartMonitoringEntry(e.get(), hwnd);
+        for (auto& e : g_entries) StartMonitoringEntry(e.get(), hwnd, /*silent=*/true);
         return 0;
     }
 
