@@ -770,20 +770,30 @@ void WorkerThreadProc(StartParams params) {
 // ---------------------------------------------------------------------------
 
 std::wstring BrowseForFolder(HWND owner) {
+    // 把樹狀結構的根節點明確設成「本機」，確保各磁碟機（C:\、D:\、E:\...）一定會
+    // 直接列在最上層可以選取。如果根節點留空（預設從桌面開始），在某些 Windows 環境
+    // 下「本機」節點不會出現在桌面底下的第一層，只看得到使用者個人資料夾，導致選不到
+    // 磁碟機——2026-08-19 使用者實際截圖回報過這個狀況。
+    PIDLIST_ABSOLUTE pidlRoot = nullptr;
+    SHGetSpecialFolderLocation(owner, CSIDL_DRIVES, &pidlRoot); // CSIDL_DRIVES = 「本機」
+
     BROWSEINFOW bi = {};
     bi.hwndOwner = owner;
-    bi.lpszTitle = L"請選擇要監控的資料夾";
+    bi.pidlRoot = pidlRoot;
+    bi.lpszTitle = L"請選擇要監控的資料夾（也可以直接選擇整個磁碟機，例如「本機磁碟 (D:)」）";
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
 
     LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-    if (!pidl) return L"";
 
     std::wstring result;
-    wchar_t path[MAX_PATH];
-    if (SHGetPathFromIDListW(pidl, path)) {
-        result = path;
+    if (pidl) {
+        wchar_t path[MAX_PATH];
+        if (SHGetPathFromIDListW(pidl, path)) {
+            result = path;
+        }
+        CoTaskMemFree(pidl);
     }
-    CoTaskMemFree(pidl);
+    if (pidlRoot) CoTaskMemFree(pidlRoot);
     return result;
 }
 
